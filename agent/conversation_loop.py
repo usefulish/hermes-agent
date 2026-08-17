@@ -7365,11 +7365,20 @@ def run_conversation(
                 _edited = sorted(getattr(agent, "_turn_file_mutation_paths", set()) or [])
                 _attempt = getattr(agent, "_pre_verify_nudges", 0)
                 try:
-                    from agent.verify_hooks import max_verify_nudges
+                    from agent.verify_hooks import max_verify_nudges, pre_verify_on_shell_turn
                     from hermes_cli.lifecycle import has_hook
                     from hermes_cli.plugins import get_pre_verify_continue_message
 
-                    if _edited and has_hook("pre_verify") and _attempt < max_verify_nudges():
+                    # A shell turn can change the tree without ever producing a
+                    # mutation path, so `_edited` alone silently skips it. Opt-in
+                    # so today's behaviour is untouched by default; `changed_paths`
+                    # stays honest either way and is empty on a shell-only turn.
+                    _shell_only = (
+                        not _edited
+                        and getattr(agent, "_turn_shell_tool_used", False)
+                        and pre_verify_on_shell_turn()
+                    )
+                    if (_edited or _shell_only) and has_hook("pre_verify") and _attempt < max_verify_nudges():
                         # Posture is fixed for the session — resolve once + cache.
                         coding = getattr(agent, "_resolved_is_coding", None)
                         if coding is None:

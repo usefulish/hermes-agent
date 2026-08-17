@@ -704,6 +704,8 @@ The `message` is appended as a synthetic user turn and the loop runs again. The 
 
 **Make it idempotent:** the hook re-fires after each nudge, so gate on `attempt` (`if attempt: return None`) — otherwise it just nudges until the bound is hit.
 
+**Shell turns:** the hook fires when `write_file`/`patch` changed something. A turn whose writes went through `terminal`/`execute_code` records no path, so by default it never reaches the hook at all — which silently skips any hook tracking an obligation across the turn. Set `agent.pre_verify_on_shell_turn: true` to fire after shell turns as well. Hermes does not parse commands and makes no claim that the tree changed: `changed_paths` is empty on such a turn, and your hook decides from its own state. Left off by default so hooks that equate being called with code having changed keep their current behaviour.
+
 **Use cases:** defer tests/lints during creative iteration, require green checks for certain paths, block "done" until a changelog entry exists, run a project-specific verification checklist.
 
 **Example — defer checks on creative UI work, scoped + one-shot:**

@@ -8,6 +8,14 @@ from typing import Any
 
 FILE_MUTATING_TOOL_NAMES = frozenset({"write_file", "patch"})
 
+# Tools that can mutate the working tree without saying so. A shell
+# command's effects are unknowable without parsing it, so these are
+# deliberately NOT members of FILE_MUTATING_TOOL_NAMES — nothing here
+# claims a file changed. They only mark the turn as one where a
+# pre_verify listener may have something to say; see
+# agent/verify_hooks.py::pre_verify_on_shell_turn.
+SHELL_TOOL_NAMES = frozenset({"terminal", "execute_code"})
+
 
 # Tools whose interrupted/dangling execution is safe to discard because they
 # cannot mutate either external state or Hermes session state. Unknown/plugin/

@@ -900,6 +900,13 @@ agent:
   # Default 3.
   # max_verify_nudges: 3
 
+  # By default `pre_verify` fires only when write_file/patch changed
+  # something, so a turn that wrote to the tree through the shell never
+  # reaches the hook. Enable this to fire it after shell turns too. It
+  # does not claim a shell turn edited code — changed_paths stays empty
+  # and your hook decides. Default false.
+  # pre_verify_on_shell_turn: false
+
   # Enable verbose logging
   verbose: false
   

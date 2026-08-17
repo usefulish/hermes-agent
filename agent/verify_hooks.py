@@ -42,6 +42,28 @@ def max_verify_nudges(config: Optional[dict[str, Any]] = None) -> int:
         return DEFAULT_MAX_VERIFY_NUDGES
 
 
+def pre_verify_on_shell_turn(config: Optional[dict[str, Any]] = None) -> bool:
+    """Also fire ``pre_verify`` on a turn that ran a shell tool. Default off.
+
+    ``pre_verify`` normally fires only when ``write_file``/``patch`` mutated
+    something. That misses a turn whose writes went through the shell: the
+    tree changed, but nothing recorded a path, so a listener tracking an
+    obligation across the turn is never asked about it.
+
+    Detecting *which* shell commands wrote is not possible without parsing
+    them, and parsing is the wrong place for that judgement — the listener
+    already holds whatever state it cares about and can decline in a
+    microsecond. So this widens the trigger rather than trying to be clever,
+    and it is opt-in: enabling it means "ask my pre_verify hooks after shell
+    turns too", not "assume a shell turn edited code". Existing listeners that
+    equate being called with code having changed are unaffected while it is
+    off.
+    """
+    return is_truthy_value(
+        _agent_cfg(config).get("pre_verify_on_shell_turn", False), default=False
+    )
+
+
 def coding_verify_guidance(config: Optional[dict[str, Any]] = None) -> Optional[str]:
     """Return the optional guidance appended to verification-stop nudges."""
     if not is_truthy_value(_agent_cfg(config).get("verify_guidance", True), default=True):
@@ -66,4 +88,5 @@ __all__ = [
     "DEFAULT_MAX_VERIFY_NUDGES",
     "coding_verify_guidance",
     "max_verify_nudges",
+    "pre_verify_on_shell_turn",
 ]

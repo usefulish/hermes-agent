@@ -202,6 +202,7 @@ from agent.tool_guardrails import (
 from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
     file_mutation_result_landed,
+    SHELL_TOOL_NAMES as _SHELL_TOOLS,
 )
 from agent.trajectory import (
     convert_scratchpad_to_think,
@@ -3435,6 +3436,13 @@ class AIAgent:
         state dict hasn't been initialised yet (e.g. a tool dispatched
         outside ``run_conversation``).
         """
+        if tool_name in _SHELL_TOOLS and not is_error:
+            # A shell command may have written to the tree; we cannot know
+            # without parsing it, and we deliberately do not parse. Record only
+            # that the turn had the opportunity, so a pre_verify listener that
+            # tracks its own state can be asked. This never adds a path to
+            # _turn_file_mutation_paths: nothing here knows a file changed.
+            self._turn_shell_tool_used = True
         if tool_name not in _FILE_MUTATING_TOOLS:
             return
         state = getattr(self, "_turn_failed_file_mutations", None)

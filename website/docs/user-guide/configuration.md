@@ -989,6 +989,7 @@ agent:
   verify_on_stop: false        # true | false | "auto" (surface-aware: on for CLI/TUI/desktop, off for messaging)
   verify_guidance: true        # Append creative-UI / clean-diff guidance to the missing-evidence nudge
   max_verify_nudges: 3         # Cap on consecutive continue nudges per turn (built-in + pre_verify hooks)
+  pre_verify_on_shell_turn: false  # Also fire pre_verify after turns that ran a shell tool
   coding_instructions: ""      # Standing project-wide coding rules appended to the coding brief
 ```
 
