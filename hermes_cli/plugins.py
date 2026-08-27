@@ -1714,6 +1714,7 @@ class PluginContext:
         description: str = "",
         emoji: str = "",
         override: bool = False,
+        never_defer: bool = False,
     ) -> Optional[PluginRegistration]:
         """Register a tool in the global registry **and** track it as plugin-provided.
 
@@ -1721,6 +1722,15 @@ class PluginContext:
         same name (e.g. swap the default ``browser_navigate`` for a custom
         CDP-backed implementation). Without it, attempting to register a name
         already claimed by a different toolset is rejected.
+
+        Pass ``never_defer=True`` for a CONTROL-PLANE tool — an attestation,
+        an approval, an escape hatch, a kill switch — that must stay callable
+        when the normal tool path is not working. Tool Search otherwise defers
+        every plugin tool behind ``tool_search``/``tool_describe``/
+        ``tool_call``, which is the machinery such a tool may need to route
+        around; a deferred escape hatch can be taken out by the same fault it
+        exists to answer. It costs the tool's schema on every turn, so use it
+        for the handful of tools that genuinely need it, not for convenience.
 
         ``override=True`` against a built-in tool requires the operator to
         opt in via ``plugins.entries.<plugin_id>.allow_tool_override: true``
@@ -1763,6 +1773,7 @@ class PluginContext:
             emoji=emoji,
             override=override,
             scope=scope,
+            never_defer=never_defer,
         )
         registered = registry.snapshot_registration(name, scope=scope)
         if (

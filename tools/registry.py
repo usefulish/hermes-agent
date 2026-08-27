@@ -208,11 +208,13 @@ class ToolEntry:
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
         "max_result_size_chars", "dynamic_schema_overrides",
+        "never_defer",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
-                 max_result_size_chars=None, dynamic_schema_overrides=None):
+                 max_result_size_chars=None, dynamic_schema_overrides=None,
+                 never_defer=False):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -231,6 +233,15 @@ class ToolEntry:
         # on every get_definitions() call; results are merged shallow on top
         # of the base schema before the {"type": "function", ...} wrap.
         self.dynamic_schema_overrides = dynamic_schema_overrides
+        # Opt out of Tool Search deferral. For CONTROL-PLANE tools only:
+        # ones whose job is to stay reachable when the normal tool path is
+        # not working — an attestation, an approval, an escape hatch, a kill
+        # switch. Deferral puts a tool behind tool_search/tool_describe/
+        # tool_call, which is precisely the machinery such a tool may need to
+        # route around, so a lazily-loaded escape hatch can be taken out by
+        # the same fault it exists to answer. Costs the tool's schema on every
+        # turn, so it is opt-in per tool and never the default.
+        self.never_defer = bool(never_defer)
 
 
 class _PluginOverridePolicy:
@@ -775,6 +786,7 @@ class ToolRegistry:
         dynamic_schema_overrides: Callable = None,
         override: bool = False,
         scope: Optional[str] = None,
+        never_defer: bool = False,
     ):
         """Register a tool.  Called at module-import time by each tool file.
 
@@ -870,6 +882,7 @@ class ToolRegistry:
                 emoji=emoji,
                 max_result_size_chars=max_result_size_chars,
                 dynamic_schema_overrides=dynamic_schema_overrides,
+                never_defer=never_defer,
             )
             # Availability is now derived per-tool (_toolset_has_exposable_tools),
             # so this map no longer gates a toolset. It is still consumed by

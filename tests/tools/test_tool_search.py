@@ -146,6 +146,54 @@ class TestClassification:
         assert BRIDGE_TOOL_NAMES <= names
         assert {"read_window_below", "apply_layout", "computer_use"} <= names
 
+    def test_never_defer_registration_stays_visible(self):
+        """A control-plane tool opts out of deferral (#96610 follow-up).
+
+        The knowfleet gate's ``nothing_to_record`` attestation was deferred
+        like any other plugin tool, so when the tool_call bridge dropped every
+        argument payload the escape hatch went down with the fault it existed
+        to answer. ``never_defer=True`` is the opt-out for that class.
+        """
+        from tools.registry import registry
+        from tools.tool_search import is_deferrable_tool_name, classify_tools
+
+        registry.register(
+            name="_nd_escape_hatch", toolset="test-gate",
+            schema={"name": "_nd_escape_hatch", "parameters": {}},
+            handler=lambda **kw: "", never_defer=True,
+        )
+        registry.register(
+            name="_nd_ordinary", toolset="test-gate",
+            schema={"name": "_nd_ordinary", "parameters": {}},
+            handler=lambda **kw: "",
+        )
+        try:
+            assert is_deferrable_tool_name("_nd_escape_hatch") is False
+            # Same toolset, same registration path — only the flag differs,
+            # so the opt-out is per tool, not per plugin.
+            assert is_deferrable_tool_name("_nd_ordinary") is True
+            visible, deferrable = classify_tools([
+                _td("_nd_escape_hatch", "escape"), _td("_nd_ordinary", "ordinary"),
+            ])
+            assert [t["function"]["name"] for t in visible] == ["_nd_escape_hatch"]
+            assert [t["function"]["name"] for t in deferrable] == ["_nd_ordinary"]
+        finally:
+            registry._tools.pop("_nd_escape_hatch", None)
+            registry._tools.pop("_nd_ordinary", None)
+
+    def test_never_defer_defaults_off(self):
+        """Every existing registration keeps its current deferral behavior."""
+        from tools.registry import registry
+        registry.register(
+            name="_nd_default", toolset="test-gate",
+            schema={"name": "_nd_default", "parameters": {}},
+            handler=lambda **kw: "",
+        )
+        try:
+            assert registry.get_entry("_nd_default").never_defer is False
+        finally:
+            registry._tools.pop("_nd_default", None)
+
     def test_unknown_tool_not_deferrable(self):
         """Defensive: a tool name we cannot resolve to a registry entry must
         not be claimed as deferrable. This protects against the OpenClaw

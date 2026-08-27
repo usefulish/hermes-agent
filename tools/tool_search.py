@@ -219,6 +219,16 @@ def is_deferrable_tool_name(name: str) -> bool:
     surface toolset. Core and direct surface tools are never deferred even
     when their toolset is technically plugin-provided (this protects
     against accidental shadowing).
+
+    A registration may also opt out explicitly with ``never_defer=True``
+    (#96610 follow-up). That exists for control-plane tools — an
+    attestation, an approval, an escape hatch — whose whole purpose is to
+    remain callable when the normal tool path is not working. Such a tool
+    behind the bridge can be disabled by the very fault it answers: when the
+    tool_call bridge dropped every argument payload, the knowfleet gate's
+    ``nothing_to_record`` attestation was deferred like any other plugin
+    tool and went down with it, leaving the session held with no way to
+    discharge its obligation.
     """
     if name in BRIDGE_TOOL_NAMES:
         return False
@@ -229,6 +239,12 @@ def is_deferrable_tool_name(name: str) -> bool:
         from tools.registry import registry
         entry = registry.get_entry(name)
         if entry is None:
+            return False
+        # Control-plane opt-out, checked before the MCP-prefix rule so it
+        # holds for every registration path. A tool that exists to be
+        # reachable when the normal tool path is broken must not sit behind
+        # the bridge: that is the machinery it may need to route around.
+        if getattr(entry, "never_defer", False):
             return False
         if entry.toolset.startswith("mcp-"):
             return True
