@@ -235,6 +235,104 @@ class TestRetrieval:
 
 
 # ---------------------------------------------------------------------------
+# Bridge schema shape — what actually reaches a constrained decoder.
+# ---------------------------------------------------------------------------
+
+
+class TestBridgeSchemas:
+    """The three bridge schemas are the only tool surface a deferred-tool
+    session has. Regression cover for the 2026-08-27 incident where every
+    ``tool_call`` from kimi-k3 (opencode-go, and earlier the Nous inference
+    API) arrived with ``arguments == {}``: ``arguments`` declares no
+    ``properties`` — it cannot, the shape is per-target — so a backend that
+    compiles the schema into a decoding grammar admitted only the empty
+    object, and no argument could cross the bridge at all.
+    """
+
+    def _params(self, name):
+        from tools.tool_search import bridge_tool_schemas
+        for td in bridge_tool_schemas(deferred_count=12):
+            if td["function"]["name"] == name:
+                return td["function"]["parameters"]
+        raise AssertionError(f"{name} missing from bridge_tool_schemas()")
+
+    def test_tool_call_arguments_is_an_open_object(self):
+        """A properties-less object MUST say additionalProperties: true.
+
+        Without it the node reads as "object with no permitted keys" to a
+        guided-decoding backend, which is exactly the shape that produced
+        ~130 consecutive empty-argument calls in the incident.
+        """
+        args = self._params("tool_call")["properties"]["arguments"]
+        assert args["type"] == "object"
+        # The premise of the bug: this node has no properties to constrain to.
+        assert "properties" not in args
+        assert args.get("additionalProperties") is True
+
+    def test_every_properties_less_object_node_is_open(self):
+        """Generalize the rule across the whole bridge surface.
+
+        Any future free-form object added to a bridge schema inherits the
+        same hazard; catch it here rather than in another dead session.
+        """
+        from tools.tool_search import bridge_tool_schemas
+
+        def walk(node, path):
+            if isinstance(node, dict):
+                if node.get("type") == "object" and not node.get("properties"):
+                    assert node.get("additionalProperties") is True, (
+                        f"{path}: properties-less object without "
+                        "additionalProperties: true — constrained backends "
+                        "will only be able to emit {}"
+                    )
+                for k, v in node.items():
+                    walk(v, f"{path}.{k}")
+            elif isinstance(node, list):
+                for i, v in enumerate(node):
+                    walk(v, f"{path}[{i}]")
+
+        for td in bridge_tool_schemas(deferred_count=12):
+            walk(td["function"]["parameters"],
+                 td["function"]["name"] + ".parameters")
+
+    def test_scalar_bridge_params_keep_declared_types(self):
+        """The params that kept working during the incident stay declared.
+
+        ``tool_search.query`` and ``tool_describe.name`` are plain strings and
+        were populated correctly on every failing turn — they are the control
+        that localizes the defect to the free-form object.
+        """
+        assert self._params("tool_search")["properties"]["query"]["type"] == "string"
+        assert self._params("tool_describe")["properties"]["name"]["type"] == "string"
+        assert self._params("tool_call")["properties"]["name"]["type"] == "string"
+
+    def test_string_arguments_still_dispatch(self):
+        """``resolve_underlying_call`` accepts a JSON-string ``arguments``.
+
+        Undeclared in the schema but long-supported, and the fallback shape a
+        backend that still refuses free-form objects can be steered toward.
+        """
+        from tools.tool_search import resolve_underlying_call
+        # A well-formed JSON string clears the parse branch and only then
+        # trips the deferrability gate (no such tool in this test registry) —
+        # the parse never rejected it.
+        _n, _a, err = resolve_underlying_call({
+            "name": "mcp__x__y",
+            "arguments": '{"id": "d688707c"}',
+        })
+        assert err is not None
+        assert "not a deferrable tool" in err
+        # A malformed one is rejected by the parse branch itself, which is
+        # what proves the string path is live rather than ignored.
+        _n, _a, err = resolve_underlying_call({
+            "name": "mcp__x__y",
+            "arguments": "{not json",
+        })
+        assert err is not None
+        assert "not valid JSON" in err
+
+
+# ---------------------------------------------------------------------------
 # Assembly — the full passthrough/activate decision.
 # ---------------------------------------------------------------------------
 

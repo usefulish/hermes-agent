@@ -751,6 +751,38 @@ def bridge_tool_schemas(
                         "arguments": {
                             "type": "object",
                             "description": "Arguments for the tool, matching its schema.",
+                            # ``additionalProperties: true`` is load-bearing, not
+                            # decoration. This is the only model-facing parameter
+                            # in the whole tool surface whose shape is unknowable
+                            # at schema-build time, so it declares no
+                            # ``properties``. Backends that constrain tool-call
+                            # decoding to the JSON Schema (guided decoding /
+                            # grammar compilation) read a properties-less object
+                            # with no ``additionalProperties`` as "an object with
+                            # no permitted keys" and emit the only string the
+                            # grammar admits: ``{}``. The model is then physically
+                            # unable to pass an argument through the bridge, and
+                            # no amount of retrying or shrinking the payload
+                            # helps, because the constraint is on the container.
+                            #
+                            # Observed live 2026-08-27 (kimi-k3 via opencode-go,
+                            # and earlier via the Nous inference API): ~130
+                            # consecutive ``tool_call`` invocations across four
+                            # sessions arrived with ``arguments == {}`` while the
+                            # sibling ``name`` string was always correct, and
+                            # ``tool_search``/``tool_describe`` (string params
+                            # only) worked throughout. Same sessions, same turns,
+                            # the model emitted deeply nested arrays-of-objects
+                            # for ``todo`` and ``memory`` — tools whose nested
+                            # shape IS declared — so the defect is the empty
+                            # schema node, not the model and not the transport.
+                            #
+                            # Boolean ``additionalProperties`` is explicitly
+                            # preserved by tools/schema_sanitizer.py as "a valid
+                            # form and widely accepted", and bridge schemas are
+                            # assembled AFTER sanitization anyway, so this node
+                            # goes to the wire exactly as written here.
+                            "additionalProperties": True,
                         },
                     },
                     "required": ["name", "arguments"],
