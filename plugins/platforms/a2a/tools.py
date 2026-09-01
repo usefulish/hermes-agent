@@ -52,6 +52,15 @@ def _auth_header(auth: dict) -> dict:
     return {"Authorization": f"Bearer {auth['token']}"} if auth and auth.get("type") == "bearer" and auth.get("token") else {}
 
 
+def _identity_headers() -> dict:
+    """Assert outbound profile/host identity as advisory provenance."""
+    try:
+        from .adapter import outbound_identity
+        return {"X-A2A-Identity": outbound_identity()}
+    except Exception:
+        return {}
+
+
 def _http_json(url: str, headers: dict, timeout: int, method: str, data: Optional[bytes] = None) -> dict:
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (configured peers)
@@ -99,7 +108,7 @@ def _send_task(agent_label: str, peer: dict, message: str, context_id: str) -> t
     """One SendMessage to a peer -> (reply_text, context_id, state). Raises urllib errors /
     ValueError for the caller to format; handles redaction, audit, persistence, metrics."""
     base_url = peer.get("url", "")
-    headers = _auth_header(peer.get("auth", {}) or {})
+    headers = {**_auth_header(peer.get("auth", {}) or {}), **_identity_headers()}
     timeout = int(peer.get("timeout", _DEFAULT_TIMEOUT))
     try:
         card = _fetch_card(base_url, headers, min(timeout, 30))  # best-effort, to learn the rpc URL
