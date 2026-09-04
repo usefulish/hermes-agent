@@ -48,8 +48,22 @@ def _resolve_peer(agent: str) -> Optional[dict]:
     return _peer_from_entry(entry, capabilities=entry.get("capabilities", []) or [], tenant=entry.get("tenant", "")) if entry else None
 
 
-def _auth_header(auth: dict) -> dict:
-    return {"Authorization": f"Bearer {auth['token']}"} if auth and auth.get("type") == "bearer" and auth.get("token") else {}
+def _resolve_env_secret(name: str) -> Optional[str]:
+    """Resolve a named secret through the active profile scope."""
+    try:
+        from agent.secret_scope import get_secret
+        return get_secret(name)
+    except Exception:
+        return os.environ.get(name)
+
+
+def _auth_header(auth: Optional[dict]) -> dict:
+    if not auth or auth.get("type") != "bearer":
+        return {}
+    token = auth.get("token")
+    if token_env := auth.get("token_env"):
+        token = _resolve_env_secret(token_env)
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
 def _identity_headers() -> dict:
