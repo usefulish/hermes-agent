@@ -702,6 +702,33 @@ class TestA2AOrchestratePeerState:
         assert "--- researcher ---\nfine" in out
 
 
+class TestA2AOrchestrateContextPropagation:
+    """#422: fan-out workers must see the caller's per-turn context (multiplexed secret scope)."""
+
+    def test_token_env_resolves_inside_fanout_workers(self, monkeypatch):
+        import agent.secret_scope as ss
+        monkeypatch.setattr(tools, "_load_config", lambda: {"a2a_agents": {
+            "p1": {"url": "http://localhost:9991", "capabilities": ["x"], "auth": {"type": "bearer", "token_env": "FLEET_A2A_TOKEN"}},
+            "p2": {"url": "http://localhost:9992", "capabilities": ["x"], "auth": {"type": "bearer", "token_env": "FLEET_A2A_TOKEN"}},
+        }})
+        seen = {}
+
+        def fake_send(name, peer, message, ctx):
+            seen[name] = tools._auth_header(peer["auth"])
+            return ("ok", "c", "TASK_STATE_COMPLETED")
+
+        monkeypatch.setattr(tools, "_send_task", fake_send)
+        monkeypatch.setattr(ss, "_MULTIPLEX_ACTIVE", True)
+        token = ss.set_secret_scope({"FLEET_A2A_TOKEN": "scoped-test-value"})
+        try:
+            out = tools.a2a_orchestrate({"capability": "x", "message": "go"})
+        finally:
+            ss.reset_secret_scope(token)
+        assert seen == {"p1": {"Authorization": "Bearer scoped-test-value"},
+                        "p2": {"Authorization": "Bearer scoped-test-value"}}
+        assert "Error" not in out
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # SSRF protection for push callbacks
 # ═════════════════════════════════════════════════════════════════════════════

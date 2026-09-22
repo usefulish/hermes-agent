@@ -5,6 +5,7 @@ capabilities}}``. Stdlib urllib; wire format is A2A v1.0 ``SendMessage`` (v0.3 r
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -306,7 +307,14 @@ def a2a_orchestrate(args: dict, **_: Any) -> str:
         return f"Error: no configured peers advertise capability '{capability}'."
     results: list[tuple[str, str]] = []
     with ThreadPoolExecutor(max_workers=min(len(matches), _ORCHESTRATE_MAX_WORKERS)) as pool:
-        futures = {pool.submit(_call_peer_sync, name, entry, message, context_id): name for name, entry in matches}
+        # Each peer call runs in its OWN copy of the caller's context. ThreadPoolExecutor does not
+        # propagate contextvars, and under the multiplexing gateway the per-turn profile secret
+        # scope and HERMES_HOME override are contextvars: without the copy, token_env auth
+        # resolved to nothing in the worker and every token-gated peer returned 401 (Knowfleet
+        # task #422, observation a9979d52). One copy per call because a Context cannot be entered
+        # by two threads at once.
+        futures = {pool.submit(contextvars.copy_context().run, _call_peer_sync, name, entry, message, context_id): name
+                   for name, entry in matches}
         for fut in as_completed(futures):
             name = futures[fut]
             try:
