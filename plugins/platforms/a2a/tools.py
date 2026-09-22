@@ -269,12 +269,25 @@ def _match_peers_by_capability(capability: str) -> list[tuple[str, dict]]:
 
 
 def _call_peer_sync(agent_name: str, peer_entry: dict, message: str, context_id: str = "") -> tuple[str, str]:
-    """Call a single peer synchronously -> (agent_name, reply_text)."""
+    """Call a single peer synchronously -> (agent_name, reply_text).
+
+    Only a COMPLETED task (or a bare Message reply, which has no state) counts
+    as a success. Any other state is returned as an "Error:" reply naming the
+    state, so a2a_orchestrate's first/best selection skips it and 'all' mode
+    labels it. Previously the state was discarded, and a peer whose task FAILED
+    (e.g. a declined permission prompt) was returned as the winning answer
+    (Knowfleet task #417, observation e45742d1). A fan-out never continues a
+    peer's context, so input-required and still-working tasks are not answers
+    either.
+    """
     try:
-        reply, _ctx, _state = _send_task(agent_name, _peer_from_entry(peer_entry), message, context_id)
-        return (agent_name, reply or "(no reply)")
+        reply, _ctx, state = _send_task(agent_name, _peer_from_entry(peer_entry), message, context_id)
     except Exception as e:
         return (agent_name, f"Error: {e}")
+    short_state = state.replace("TASK_STATE_", "").replace("_", "-").lower()  # v0.3 states pass through
+    if short_state not in ("", "completed"):
+        return (agent_name, f"Error: peer task {short_state}: {reply or '(no reply)'}")
+    return (agent_name, reply or "(no reply)")
 
 
 def a2a_orchestrate(args: dict, **_: Any) -> str:

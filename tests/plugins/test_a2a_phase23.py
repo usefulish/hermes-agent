@@ -647,6 +647,61 @@ class TestA2AOrchestrate:
         assert "win" in out
 
 
+class TestA2AOrchestratePeerState:
+    """#417: a peer's task state decides success, not merely the absence of a
+    transport error."""
+
+    @pytest.mark.parametrize("state,expect_error", [
+        ("TASK_STATE_COMPLETED", False),
+        ("", False),                           # bare Message reply: no task state
+        ("completed", False),                  # v0.3 peers
+        ("TASK_STATE_FAILED", True),
+        ("TASK_STATE_CANCELED", True),
+        ("TASK_STATE_REJECTED", True),
+        ("TASK_STATE_INPUT_REQUIRED", True),
+        ("TASK_STATE_WORKING", True),
+        ("failed", True),                      # v0.3 peers
+    ])
+    def test_call_peer_sync_maps_state(self, monkeypatch, state, expect_error):
+        monkeypatch.setattr(tools, "_send_task", lambda *a, **k: ("peer said this", "ctx-1", state))
+        name, reply = tools._call_peer_sync("p", {"url": "http://localhost:9999"}, "go")
+        assert name == "p"
+        assert reply.startswith("Error:") is expect_error
+        assert "peer said this" in reply
+        if expect_error:
+            assert state.replace("TASK_STATE_", "").replace("_", "-").lower() in reply
+
+    def test_failed_peer_never_wins_first_or_best(self, monkeypatch):
+        monkeypatch.setattr(tools, "_load_config", lambda: _TWO_PEERS)
+        outcomes = {
+            "researcher": ("ok", "ctx-r", "TASK_STATE_COMPLETED"),
+            "generalist": ("a very long failure message " * 20, "ctx-g", "TASK_STATE_FAILED"),
+        }
+        monkeypatch.setattr(tools, "_send_task", lambda name, *a, **k: outcomes[name])
+        best = tools.a2a_orchestrate({"capability": "research", "message": "go", "mode": "best"})
+        assert best.startswith("[best: researcher]")
+        first = tools.a2a_orchestrate({"capability": "research", "message": "go", "mode": "first"})
+        assert first.startswith("[first: researcher]")
+
+    def test_all_failed_states_report_failure(self, monkeypatch):
+        monkeypatch.setattr(tools, "_load_config", lambda: _TWO_PEERS)
+        monkeypatch.setattr(tools, "_send_task", lambda name, *a, **k: ("declined a permission prompt", "c", "TASK_STATE_FAILED"))
+        out = tools.a2a_orchestrate({"capability": "research", "message": "go", "mode": "first"})
+        assert out.startswith("All peers failed:")
+        assert "peer task failed" in out
+
+    def test_all_mode_labels_failed_peer(self, monkeypatch):
+        monkeypatch.setattr(tools, "_load_config", lambda: _TWO_PEERS)
+        outcomes = {
+            "researcher": ("fine", "c1", "TASK_STATE_COMPLETED"),
+            "generalist": ("boom", "c2", "TASK_STATE_FAILED"),
+        }
+        monkeypatch.setattr(tools, "_send_task", lambda name, *a, **k: outcomes[name])
+        out = tools.a2a_orchestrate({"capability": "research", "message": "go"})
+        assert "--- generalist ---\nError: peer task failed: boom" in out
+        assert "--- researcher ---\nfine" in out
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # SSRF protection for push callbacks
 # ═════════════════════════════════════════════════════════════════════════════
