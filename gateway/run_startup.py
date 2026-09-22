@@ -754,6 +754,7 @@ class GatewayStartupMixin:
                 disarm_startup_watchdog()
         logger.info("Session storage: %s", self.config.sessions_dir)
         self._start_log_systemd_timing_alignment()
+        self._start_log_launchd_timing_alignment()
         # Log the resolved max_iterations so operators can verify the config.yaml → env bridge.
         with suppress(Exception):
             logger.info(
@@ -816,6 +817,29 @@ class GatewayStartupMixin:
                     _alignment["drain_timeout"],
                     _alignment.get("cron_drain_timeout", DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT),
                     _alignment["expected_min"],
+                )
+
+    def _start_log_launchd_timing_alignment(self) -> None:
+        """launchd sibling of the systemd warning: a plist from before a drain-budget bump
+        encodes an ExitTimeOut below the stop budget, so launchd SIGKILLs an in-budget
+        drain before the in-process watchdog can fire (de3364c1 / task #390). Never raises."""
+        with _log_suppressed(logging.DEBUG, "check_launchd_exit_timeout_alignment failed: %s"):
+            from gateway.shutdown_forensics import check_launchd_exit_timeout_alignment
+            _alignment = check_launchd_exit_timeout_alignment(
+                self._restart_drain_timeout,
+                getattr(self, "_cron_drain_timeout", DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT),
+            )
+            if _alignment is not None and _alignment.get("mismatch"):
+                logger.warning(
+                    "Stale launchd plist detected: %s has ExitTimeOut=%.0fs but drain_timeout=%.0fs "
+                    "cron_drain_timeout=%.0fs (expected >=%.0fs). launchd may SIGKILL the gateway "
+                    "mid-drain before the in-process shutdown watchdog fires. Run `hermes gateway "
+                    "install --force` to regenerate the plist, or shorten agent.restart_drain_timeout "
+                    "/ agent.cron_drain_timeout.",
+                    _alignment.get("label", "(unknown)"), _alignment["exit_timeout_s"],
+                    _alignment["drain_timeout"],
+                    _alignment.get("cron_drain_timeout", DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT),
+                    _alignment["expected_min_s"],
                 )
 
     # Builtin platforms whose ``<P>_ALLOWED_USERS`` / ``<P>_ALLOW_ALL_USERS`` env vars count as an

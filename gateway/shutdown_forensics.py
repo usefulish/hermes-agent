@@ -270,3 +270,89 @@ def parse_systemd_duration_to_us(raw: str) -> Optional[int]:
             return None
     return total_us if total_us > 0 else None
 
+
+# ---------------------------------------------------------------------------
+# launchd ExitTimeOut alignment (sibling of check_systemd_timing_alignment)
+# ---------------------------------------------------------------------------
+
+def probe_launchd_supervision() -> bool:
+    """True when this process runs as a launchd job (macOS agent/daemon).
+
+    launchd exports ``XPC_SERVICE_NAME`` to the jobs it spawns; a non-empty
+    value that isn't the literal ``0`` (an undocumented sentinel seen for some
+    inherited environments) means launchd is the supervisor and the job's
+    ``ExitTimeOut`` bounds the graceful SIGTERM→SIGKILL window. Never raises.
+    """
+    try:
+        name = os.environ.get("XPC_SERVICE_NAME", "").strip()
+        return bool(name) and name != "0"
+    except Exception:
+        return False
+
+
+def _launchd_job_label() -> Optional[str]:
+    """Best-effort label of the launchd job this process runs under."""
+    name = os.environ.get("XPC_SERVICE_NAME", "").strip()
+    if name and name != "0":
+        return name
+    return None
+
+
+def _launchd_exit_timeout_seconds(label: str) -> Optional[int]:
+    """``ExitTimeOut`` of launchd job *label* in seconds; None when undeterminable.
+
+    ``launchctl print gui/<uid>/<label>`` emits ``exit timeout = 25 seconds``.
+    Never raises; bounded at 2s so a hung launchctl cannot stall startup.
+    """
+    try:
+        result = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    for line in (result.stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("exit timeout"):
+            _, _, rest = stripped.partition("=")
+            digits = "".join(ch for ch in rest.split()[:1] if ch.isdigit())
+            try:
+                value = int(digits)
+            except ValueError:
+                return None
+            return value if value > 0 else None
+    return None
+
+
+def check_launchd_exit_timeout_alignment(
+    drain_timeout: float, cron_drain_timeout: float = DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT
+) -> Optional[Dict[str, Any]]:
+    """At startup, sanity-check that launchd's ``ExitTimeOut`` covers the stop
+    budget — the launchd sibling of :func:`check_systemd_timing_alignment`.
+
+    A plist generated before a drain-budget bump (or hand-edited) can encode an
+    ``ExitTimeOut`` below the stop budget, so launchd SIGKILLs the gateway
+    mid-drain before the in-process shutdown watchdog (drain+grace) can fire:
+    no exit path runs, buffered log lines die with the process, and the ledger
+    records an unclean death (incident de3364c1 / task #390). ``None`` when
+    aligned OR undeterminable (not launchd-supervised, no launchctl, timeout
+    not parseable); otherwise a dict with the same shape as the systemd check.
+    """
+    if not probe_launchd_supervision():
+        return None
+    label = _launchd_job_label()
+    if label is None:
+        return None
+    exit_timeout_s = _launchd_exit_timeout_seconds(label)
+    if exit_timeout_s is None:
+        return None
+    expected_min = float(resolve_systemd_timeout_stop_sec(drain_timeout, cron_drain_timeout))
+    return {
+        "label": label,
+        "exit_timeout_s": exit_timeout_s,
+        "drain_timeout": float(drain_timeout),
+        "cron_drain_timeout": float(cron_drain_timeout),
+        "expected_min_s": expected_min,
+        "mismatch": exit_timeout_s < expected_min,
+    }
+

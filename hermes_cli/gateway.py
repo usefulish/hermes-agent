@@ -3183,6 +3183,24 @@ def _get_cron_drain_timeout() -> float:
     return _agent_timeout_setting("HERMES_CRON_DRAIN_TIMEOUT", "cron_drain_timeout", parse_cron_drain_timeout)
 
 
+def resolve_launchd_exit_timeout(
+    drain_timeout: float | None = None, cron_drain_timeout: float | None = None
+) -> int:
+    """Seconds the launchd plist's ``ExitTimeOut`` must grant the gateway.
+
+    launchd escalates SIGTERM → SIGKILL after ``ExitTimeOut``, so it must cover
+    the same stop budget systemd's ``TimeoutStopSec`` covers (chat drain or
+    cron drain + cleanup, plus headroom; 60s floor) — or launchd kills an
+    in-budget drain before the in-process shutdown watchdog can even fire
+    (incident de3364c1 / task #390). Uses the configured timeouts when the
+    caller passes None, mirroring ``resolve_systemd_timeout_stop_sec`` usage.
+    """
+    return resolve_systemd_timeout_stop_sec(
+        _get_restart_drain_timeout() if drain_timeout is None else drain_timeout,
+        _get_cron_drain_timeout() if cron_drain_timeout is None else cron_drain_timeout,
+    )
+
+
 def _get_restart_exit_wait_budget() -> float:
     """CLI wait for gateway exit after SIGUSR1 / self-restart (#77184)."""
     return resolve_restart_exit_wait_budget(
@@ -3840,6 +3858,11 @@ def generate_launchd_plist() -> str:
     </dict>
 """
 
+    # launchd escalates SIGTERM → SIGKILL after ExitTimeOut: derive it from the
+    # same stop budget the systemd unit's TimeoutStopSec uses, or a legal drain
+    # gets killed mid-flight (de3364c1 / task #390).
+    exit_timeout = resolve_launchd_exit_timeout()
+
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -3881,13 +3904,15 @@ def generate_launchd_plist() -> str:
 
     <!-- ThrottleInterval raises launchd's default 10s minimum respawn interval
          to 30s so a crash-looping gateway can't hammer launchd into a rapid
-         respawn storm; ExitTimeOut gives the gateway 25s of graceful-drain
-         headroom before launchd escalates from SIGTERM to SIGKILL on stop. -->
+         respawn storm. ExitTimeOut is derived from the configured stop budget
+         (resolve_launchd_exit_timeout): it must cover the drain the gateway
+         may legally run (chat/cron drain + cleanup, 60s floor) or launchd
+         SIGKILLs an in-budget drain mid-flight (de3364c1 / task #390). -->
     <key>ThrottleInterval</key>
     <integer>30</integer>
 
     <key>ExitTimeOut</key>
-    <integer>25</integer>
+    <integer>{exit_timeout}</integer>
 {nofile_block}
     <key>StandardOutPath</key>
     <string>{log_dir}/gateway.log</string>
