@@ -563,6 +563,13 @@ DEFAULT_CONFIG = {
         # A prune only commits when it reclaims at least this many tokens, then waits for a
         # trigger-sized runway to regrow before rearming. 0 = no minimum-savings gate.
         "proactive_prune_min_reclaim_tokens": 4096,
+        # wire_demotion (opt-in, NOT a default key; add it per profile): for routes WITHOUT prompt
+        # caching, demote tool results older than the last `keep_last_messages` on EVERY request
+        # (request copy only; history untouched) to stubs that keep the result's evidence keys
+        # (UUIDs, hex ids/SHAs, absolute paths, long numbers). Never use it on a caching provider:
+        # each demotion changes the prefix and forfeits the cache. See agent/wire_demotion.py.
+        #   wire_demotion: {enabled: true, keep_last_messages: 6, min_result_chars: 500, ab_split: false}
+        # ab_split: true assigns each session a stable 'on'/'off' arm by hash (logged) for A/B runs.
         # micro_compact: opt-in — after each turn fold the oldest un-absorbed exchange into a
         # rolling summary, amortizing compression cost. Off by default because every pass rewrites
         # sent history and breaks the prompt-cache prefix EVERY turn; enable only if the amortized

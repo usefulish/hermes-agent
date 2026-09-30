@@ -2293,6 +2293,55 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
             return max(1, min(trigger_cap, effective_window - 1))
         return floored
 
+    @staticmethod
+    def _normalize_wire_demotion(cfg: Any) -> dict:
+        """``compression.wire_demotion`` → {enabled, keep_last_messages, min_result_chars, ab_split}."""
+        cfg = cfg if isinstance(cfg, dict) else {}
+
+        def _int(key: str, default: int, floor: int) -> int:
+            try:
+                return max(floor, int(cfg.get(key, default)))
+            except (TypeError, ValueError):
+                return default
+
+        return {
+            "enabled": cfg.get("enabled") is True,
+            "keep_last_messages": _int("keep_last_messages", 6, 2),
+            "min_result_chars": _int("min_result_chars", 500, 200),
+            # A/B: each session is assigned 'on'/'off' by a stable hash of its id (logged), so
+            # alternating cron sessions can be compared under the same load.
+            "ab_split": cfg.get("ab_split") is True,
+        }
+
+    def _wire_demotion_select(self, request_messages, *, conversation_messages=None, incoming_message=None,
+                              budget_tokens: int = 0):
+        """Per-request ``select_context`` (ContextEngine) implementation: key-preserving demotion of old tool results on the
+        REQUEST copy when ``compression.wire_demotion.enabled``. Returns None (request untouched,
+        byte-identical) when disabled, when the session's A/B arm is 'off', or when nothing
+        qualifies. History is never mutated; the host fails open on any exception."""
+        cfg = self.wire_demotion
+        if not cfg.get("enabled"):
+            return None
+        from agent.wire_demotion import ab_arm, demote_request
+
+        session_id = getattr(self, "_session_id", "") or ""
+        if cfg.get("ab_split"):
+            arm = ab_arm(session_id)
+            if getattr(self, "_wire_demotion_logged_arm", None) != session_id:
+                self._wire_demotion_logged_arm = session_id
+                logger.info("wire demotion A/B arm=%s session=%s", arm, session_id or "-")
+            if arm == "off":
+                return None
+        selected, stats = demote_request(
+            request_messages, keep_last_messages=cfg["keep_last_messages"], min_result_chars=cfg["min_result_chars"],
+        )
+        if selected is not None:
+            logger.info(
+                "wire demotion: %d tool result(s) demoted, %d -> %d chars (session=%s)",
+                stats["demoted"], stats["chars_before"], stats["chars_after"], session_id or "-",
+            )
+        return selected
+
     def __init__(
         self, model: str, threshold_percent: float = 0.50, protect_first_n: int = 3, protect_last_n: int = 20,
         summary_target_ratio: float = 0.20, quiet_mode: bool = False, summary_model_override: str = None,
@@ -2301,9 +2350,17 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         model_thresholds: dict[str, float] | None = None, threshold_tokens_cap: Any = None,
         proactive_prune_tokens: int = 0, proactive_prune_min_result_chars: int = 8000,
         proactive_prune_min_reclaim_tokens: int = 4096, min_tail_user_messages: int = 1, tail_mode: str = "lean",
-        custom_providers: list | None = None,
+        custom_providers: list | None = None, wire_demotion: dict | None = None,
     ):
         self.model, self.base_url, self.api_key, self.provider, self.api_mode = model, base_url, api_key, provider, api_mode
+        # Key-preserving wire demotion for UNCACHED routes (agent/wire_demotion.py); off unless the
+        # profile opts in. Normalized here so select_context() stays a cheap no-op when disabled.
+        self.wire_demotion = self._normalize_wire_demotion(wire_demotion)
+        # Bound ONLY when enabled: the host detects an overridden select_context per engine and,
+        # when it finds one, clones the whole conversation on every request to call it. Leaving
+        # the class default in place keeps every profile that has not opted in at zero cost.
+        if self.wire_demotion["enabled"]:
+            self.select_context = self._wire_demotion_select
         # "lean" = small clamped tail + verbatim-user summary section; "legacy" = 0.20*window tail.
         self.tail_mode = tail_mode if tail_mode in ("legacy", "lean") else "lean"
         # Per-model context_length overrides live in custom_providers; without them deferred
