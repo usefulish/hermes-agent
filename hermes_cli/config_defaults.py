@@ -568,7 +568,10 @@ DEFAULT_CONFIG = {
         # (request copy only; history untouched) to stubs that keep the result's evidence keys
         # (UUIDs, hex ids/SHAs, absolute paths, long numbers). Never use it on a caching provider:
         # each demotion changes the prefix and forfeits the cache. See agent/wire_demotion.py.
-        #   wire_demotion: {enabled: true, keep_last_messages: 6, min_result_chars: 500, ab_split: false}
+        #   wire_demotion: {enabled: true, keep_last_messages: 10, min_result_chars: 500, hot_window: 8,
+        #                   max_demoted_requests: 30, ab_split: false}
+        # hot_window: results of calls whose argument keys recur in that many recent assistant messages
+        # stay verbatim (the working set). max_demoted_requests: progress brake per session.
         # ab_split: true assigns each session a stable 'on'/'off' arm by hash (logged) for A/B runs.
         # micro_compact: opt-in — after each turn fold the oldest un-absorbed exchange into a
         # rolling summary, amortizing compression cost. Off by default because every pass rewrites

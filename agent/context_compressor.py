@@ -2306,8 +2306,15 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
 
         return {
             "enabled": cfg.get("enabled") is True,
-            "keep_last_messages": _int("keep_last_messages", 6, 2),
+            "keep_last_messages": _int("keep_last_messages", 10, 2),
             "min_result_chars": _int("min_result_chars", 500, 200),
+            # Results of calls whose argument keys recur in this many recent assistant messages
+            # stay verbatim (the working set; v1 without this caused a re-fetch loop, f1778a10).
+            "hot_window": _int("hot_window", 8, 1),
+            # Progress brake: demote at most this many requests per session; a run still going
+            # past it finishes on full context (healthy investigator runs complete in ~19-41
+            # requests, median ~26; the v1 re-fetch loop ran to its 60-request cap).
+            "max_demoted_requests": _int("max_demoted_requests", 30, 1),
             # A/B: each session is assigned 'on'/'off' by a stable hash of its id (logged), so
             # alternating cron sessions can be compared under the same load.
             "ab_split": cfg.get("ab_split") is True,
@@ -2332,13 +2339,26 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
                 logger.info("wire demotion A/B arm=%s session=%s", arm, session_id or "-")
             if arm == "off":
                 return None
+        if getattr(self, "_wire_demotion_session", None) != session_id:
+            self._wire_demotion_session = session_id
+            self._wire_demotion_requests = 0
+        self._wire_demotion_requests += 1
+        if self._wire_demotion_requests > cfg["max_demoted_requests"]:
+            if self._wire_demotion_requests == cfg["max_demoted_requests"] + 1:
+                logger.warning(
+                    "wire demotion: progress brake after %d requests; full context for the rest of session=%s",
+                    cfg["max_demoted_requests"], session_id or "-",
+                )
+            return None
         selected, stats = demote_request(
-            request_messages, keep_last_messages=cfg["keep_last_messages"], min_result_chars=cfg["min_result_chars"],
+            request_messages, keep_last_messages=cfg["keep_last_messages"],
+            min_result_chars=cfg["min_result_chars"], hot_window=cfg["hot_window"],
         )
         if selected is not None:
             logger.info(
-                "wire demotion: %d tool result(s) demoted, %d -> %d chars (session=%s)",
-                stats["demoted"], stats["chars_before"], stats["chars_after"], session_id or "-",
+                "wire demotion: %d tool result(s) demoted (%d as pointers), %d pinned hot, %d -> %d chars (session=%s)",
+                stats["demoted"], stats["pointers"], stats["pinned_hot"], stats["chars_before"],
+                stats["chars_after"], session_id or "-",
             )
         return selected
 

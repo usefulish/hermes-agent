@@ -118,3 +118,69 @@ def test_config_normalization_clamps_and_rejects_truthy_strings():
     n = ContextCompressor._normalize_wire_demotion({"enabled": "yes", "keep_last_messages": 0, "min_result_chars": 5})
     assert n["enabled"] is False, "only a real boolean true enables it"
     assert n["keep_last_messages"] == 2 and n["min_result_chars"] == 200
+
+
+# -- v2 (after the v1 re-fetch loop, knowfleet incident f1778a10) ------------------------------------
+
+
+def _read(cid, rid):
+    return {"role": "assistant", "content": "", "tool_calls": [_bridge(cid, "mcp__knowfleet__knowledge_read", {"id": rid})]}
+
+
+def _filler(n):
+    """n small, unrelated exchanges to push older results out of the protected tail."""
+    out = []
+    for i in range(n):
+        out.append({"role": "assistant", "content": "", "tool_calls": [_call(f"f{i}", "terminal", {"command": f"echo {i}"})]})
+        out.append({"role": "tool", "tool_call_id": f"f{i}", "content": "ok"})
+    return out
+
+
+def test_working_set_stays_verbatim_while_its_key_is_in_recent_calls():
+    target, other = UUID, "11111111-2222-3333-4444-555555555555"
+    msgs = [{"role": "user", "content": "go"},
+            _read("a", target), {"role": "tool", "tool_call_id": "a", "content": BIG},
+            _read("b", other), {"role": "tool", "tool_call_id": "b", "content": BIG.replace(UUID, other)}]
+    msgs += _filler(6)
+    # a recent call still about the target: its record is the working set
+    msgs.append({"role": "assistant", "content": "", "tool_calls": [
+        _bridge("c", "mcp__knowfleet__investigation_list", {"record_id": target})]})
+    msgs.append({"role": "tool", "tool_call_id": "c", "content": "small"})
+    # hot_window=4: the last 4 assistant messages are 3 filler calls + the target call, so
+    # only the target is hot; the call that read `other` is older than the window.
+    out, stats = demote_request(msgs, keep_last_messages=4, hot_window=4)
+    assert out[2]["content"] == BIG, "the record being worked on is pinned"
+    assert out[4]["content"].startswith(DEMOTED_MARKER), "a cold record is demoted"
+    assert stats["pinned_hot"] == 1
+
+
+def test_identical_calls_keep_only_the_newest_result_and_older_copies_become_pointers():
+    msgs = [{"role": "user", "content": "go"},
+            _read("a", UUID), {"role": "tool", "tool_call_id": "a", "content": BIG},
+            _read("b", UUID), {"role": "tool", "tool_call_id": "b", "content": BIG}]
+    msgs += _filler(3)
+    out, stats = demote_request(msgs, keep_last_messages=4, hot_window=1)
+    assert "same call was made again later" in out[2]["content"], "older duplicate is a pointer"
+    assert stats["pointers"] == 1
+
+
+def test_stub_wording_does_not_push_an_immediate_refetch():
+    out, _ = demote_request(_conversation(), keep_last_messages=4, hot_window=1)
+    stub = next(m["content"] for m in out if m["role"] == "tool" and m["content"].startswith(DEMOTED_MARKER))
+    assert "only if you need specific details" in stub
+    assert "do not rely on memory" not in stub
+
+
+def test_progress_brake_stops_demoting_after_the_cap():
+    comp = _compressor(enabled=True, keep_last_messages=4, hot_window=1, max_demoted_requests=2)
+    comp.bind_session_state(session_db=None, session_id="s")
+    assert comp.select_context(_conversation()) is not None
+    assert comp.select_context(_conversation()) is not None
+    assert comp.select_context(_conversation()) is None, "past the cap the run finishes on full context"
+    comp.bind_session_state(session_db=None, session_id="s2")
+    assert comp.select_context(_conversation()) is not None, "the cap is per session"
+
+
+def test_v2_defaults():
+    n = ContextCompressor._normalize_wire_demotion({"enabled": True})
+    assert (n["keep_last_messages"], n["hot_window"], n["max_demoted_requests"]) == (10, 8, 30)

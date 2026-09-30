@@ -2,9 +2,9 @@
 
 On a route that caches nothing, every request re-sends the whole conversation, and
 old tool results dominate the bill. This rewrites the REQUEST copy only (via the
-context engine's per-request ``select_context`` hook): tool results older than the
-last ``keep_last_messages`` messages, and longer than ``min_result_chars``, are replaced
-by a stub that keeps what a later step may need to cite:
+context engine's per-request ``select_context`` hook): cold tool results older than
+the last ``keep_last_messages`` messages, and longer than ``min_result_chars``, are
+replaced by a stub that keeps what a later step may need to cite:
 
   - the tool name and a short form of its arguments, so the model can re-run it;
   - the original size;
@@ -12,14 +12,25 @@ by a stub that keeps what a later step may need to cite:
     absolute paths and long numbers. Those are version-addressed handles, so they
     stay valid; the content behind them is re-fetched, never paraphrased.
 
+v2 (after the first live run, knowfleet incident f1778a10): demoting the WORKING SET
+makes the model re-fetch it on every turn. With a 6-message tail, the record under
+investigation was re-read 27x and the run hit its iteration cap. So:
+
+  - a result stays verbatim while its call is HOT: the call's own argument keys
+    (e.g. the record id it read) recur in the last ``hot_window`` assistant messages;
+  - identical (tool, args) calls keep only their NEWEST result verbatim; older copies
+    become short pointers, not full stubs;
+  - the stub wording no longer pushes an immediate re-fetch;
+  - the host caps how many requests per session it demotes (a progress brake): if a
+    run is still going past the cap, it finishes on full context. A re-fetch counter
+    was tried and rejected: this workload re-reads records naturally (2-60 re-reads of
+    stubbed calls per healthy run, median ~16), so re-fetch counts and densities did
+    not separate healthy runs from the v1 loop.
+
 Persisted history is never touched. On a caching provider this is a bad trade (every
 demotion changes the prefix and forfeits the cache), so it is opt-in per profile via
-``compression.wire_demotion``. Measured basis: knowfleet task #564 replay, record
-edc31437. Over 6 recorded runs this shape cut input ~44% with 1/57 dangling citations
-in final writes, against 10/57 for demotion without keys.
-
-Mutable state (task/investigation status, live host state, current file contents) is
-exactly what a stub must NOT stand in for; the stub text says to re-run the call.
+``compression.wire_demotion``. Measured basis: knowfleet task #564 replay (record
+edc31437) and live runs (#566).
 """
 
 from __future__ import annotations
@@ -63,61 +74,108 @@ def _content_text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
+def _unwrap(call: Dict[str, Any]) -> Tuple[str, str]:
+    """(tool name, canonical args) for one tool call, unwrapping the tool_call bridge."""
+    fn = call.get("function") or {}
+    name, args = fn.get("name") or "?", fn.get("arguments") or ""
+    try:
+        parsed = json.loads(args) if args else {}
+    except ValueError:
+        parsed = None
+    if name == "tool_call" and isinstance(parsed, dict):
+        inner = parsed.get("calls") or []
+        if inner and isinstance(inner[0], dict):
+            name = inner[0].get("name") or name
+            parsed = inner[0].get("arguments") or {}
+    if isinstance(parsed, (dict, list)):
+        args = json.dumps(parsed, sort_keys=True)
+    return name, args
+
+
 def _call_index(messages: List[Dict[str, Any]]) -> Dict[str, Tuple[str, str]]:
-    """tool_call_id -> (tool name, argument preview), unwrapping the tool_call bridge."""
+    """tool_call_id -> (tool name, canonical args)."""
     index: Dict[str, Tuple[str, str]] = {}
     for msg in messages:
         if msg.get("role") != "assistant":
             continue
         for call in msg.get("tool_calls") or []:
-            fn = call.get("function") or {}
-            name, args = fn.get("name") or "?", fn.get("arguments") or ""
-            if name == "tool_call":
-                try:
-                    inner = (json.loads(args) or {}).get("calls") or []
-                    if inner and isinstance(inner[0], dict):
-                        name = inner[0].get("name") or name
-                        args = json.dumps(inner[0].get("arguments") or {}, sort_keys=True)
-                except (ValueError, AttributeError):
-                    pass
             if call.get("id"):
-                index[call["id"]] = (name, args[:ARG_PREVIEW_CHARS])
+                index[call["id"]] = _unwrap(call)
     return index
+
+
+def _hot_keys(messages: List[Dict[str, Any]], hot_window: int) -> set:
+    """Evidence keys in the arguments and text of the last ``hot_window`` assistant messages."""
+    hot: set = set()
+    seen = 0
+    for msg in reversed(messages):
+        if msg.get("role") != "assistant":
+            continue
+        seen += 1
+        text = _content_text(msg.get("content"))
+        for call in msg.get("tool_calls") or []:
+            text += " " + _unwrap(call)[1]
+        hot.update(evidence_keys(text, limit=200))
+        if seen >= hot_window:
+            break
+    return hot
 
 
 def stub_for(name: str, args_preview: str, original: str) -> str:
     keys = evidence_keys(original)
     keys_part = ", ".join(keys) if keys else "none"
-    return (f"{DEMOTED_MARKER} Earlier result of {name}({args_preview}) — {len(original)} chars, removed from "
-            f"this request to save tokens. Evidence keys it contained: {keys_part}. If you need anything "
-            f"from it beyond these keys, call the tool again; do not rely on memory for its content.")
+    return (f"{DEMOTED_MARKER} Earlier result of {name}({args_preview}) — {len(original)} chars, trimmed from "
+            f"this request to save tokens. Evidence keys it contained: {keys_part}. Use these keys as "
+            f"references; call the tool again only if you need specific details beyond them.")
 
 
-def demote_request(messages: List[Dict[str, Any]], *, keep_last_messages: int = 6,
-                   min_result_chars: int = 500) -> Tuple[Optional[List[Dict[str, Any]]], Dict[str, int]]:
+def pointer_for(name: str, args_preview: str, original: str) -> str:
+    return (f"{DEMOTED_MARKER} Earlier result of {name}({args_preview}) — {len(original)} chars; the same "
+            f"call was made again later in this conversation, see the newer result.")
+
+
+def demote_request(messages: List[Dict[str, Any]], *, keep_last_messages: int = 10,
+                   min_result_chars: int = 500, hot_window: int = 8,
+                   ) -> Tuple[Optional[List[Dict[str, Any]]], Dict[str, int]]:
     """Return (new request list or None if nothing changed, stats). Never mutates ``messages``."""
-    stats = {"demoted": 0, "chars_before": 0, "chars_after": 0}
+    stats = {"demoted": 0, "pointers": 0, "pinned_hot": 0, "chars_before": 0, "chars_after": 0}
     if not messages:
         return None, stats
     boundary = len(messages) - max(0, int(keep_last_messages))
     calls = _call_index(messages)
+    hot = _hot_keys(messages, hot_window)
+    # Newest occurrence of each identical call: older copies become pointers.
+    newest: Dict[Tuple[str, str], int] = {}
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "tool" and msg.get("tool_call_id") in calls:
+            newest[calls[msg["tool_call_id"]]] = i
     out: List[Dict[str, Any]] = []
     for i, msg in enumerate(messages):
         if i >= boundary or msg.get("role") != "tool":
             out.append(msg)
             continue
         text = _content_text(msg.get("content"))
-        name, args = calls.get(msg.get("tool_call_id") or "", (msg.get("name") or "?", ""))
+        key = calls.get(msg.get("tool_call_id") or "", (msg.get("name") or "?", ""))
+        name, args = key
         if len(text) < min_result_chars or text.startswith(DEMOTED_MARKER) or name in NEVER_DEMOTE_TOOLS:
             out.append(msg)
             continue
-        stub = stub_for(name, args, text)
+        preview = args[:ARG_PREVIEW_CHARS]
+        if key in newest and newest[key] != i:
+            replacement = pointer_for(name, preview, text)
+            stats["pointers"] += 1
+        elif set(evidence_keys(args, limit=50)) & hot:
+            out.append(msg)  # working set: the model is still using what this call fetched
+            stats["pinned_hot"] += 1
+            continue
+        else:
+            replacement = stub_for(name, preview, text)
         new_msg = dict(msg)
-        new_msg["content"] = stub
+        new_msg["content"] = replacement
         out.append(new_msg)
         stats["demoted"] += 1
         stats["chars_before"] += len(text)
-        stats["chars_after"] += len(stub)
+        stats["chars_after"] += len(replacement)
     return (out if stats["demoted"] else None), stats
 
 
